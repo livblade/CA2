@@ -115,10 +115,16 @@ module.exports = {
   },
 
   // --- Orders support (simple implementation) ---
-  // addOrder(userId, total, cb) -> inserts an order and returns the inserted id via callback results.insertId
-  addOrder: (userId, total, cb) => {
-    const sql = 'INSERT INTO orders (userId, total, createdAt) VALUES (?, ?, NOW())';
-    return runQuery(sql, [userId, total], cb);
+  // addOrder(userId, total, displayCurrency, bnplMonths, cb) -> inserts an order and returns the inserted id via callback results.insertId
+  addOrder: (userId, total, displayCurrency, bnplMonths, cb) => {
+    // Handle optional parameters (backward compatibility)
+    if (typeof displayCurrency === 'function') {
+      cb = displayCurrency;
+      displayCurrency = null;
+      bnplMonths = null;
+    }
+    const sql = 'INSERT INTO orders (userId, total, displayCurrency, bnplMonths, createdAt) VALUES (?, ?, ?, ?, NOW())';
+    return runQuery(sql, [userId, total, displayCurrency, bnplMonths], cb);
   },
 
   // addOrderItems(orderId, items, cb) -> items: [{ productId, productName, price, quantity }]

@@ -10,6 +10,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@paypal/checkout-server-sdk": "^1.0.3",
+    "axios": "^1.7.9",
+    "body-parser": "^1.20.3",
     "connect-flash": "^0.1.1",
     "dotenv": "^17.2.3",
     "ejs": "^3.1.10",
@@ -17,6 +20,8 @@
     "express-session": "^1.18.2",
     "multer": "^2.0.1",
     "mysql2": "^3.14.1",
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.10",
+    "stripe": "^20.2.0",
+    "uuid": "^13.0.0"
   }
 }

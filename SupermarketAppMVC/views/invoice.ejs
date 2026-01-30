@@ -128,12 +128,34 @@
               <span>Grand Total:</span>
               <span class="invoice-grand-total-amount">$<%= parseFloat(order.total).toFixed(2) %></span>
             </div>
+            
+            <!-- Display Currency & BNPL Info if available -->
+            <% if (order.displayCurrency && order.displayCurrency !== 'SGD') { %>
+            <div class="invoice-total-row mt-3" style="border-top: 1px solid #e0e0e0; padding-top: 0.5rem;">
+              <span><small>Display Currency: <%= order.displayCurrency %></small></span>
+              <span><small><em>(Charged in SGD)</em></small></span>
+            </div>
+            <% } %>
+            
+            <% if (order.bnplMonths && order.bnplMonths !== 'none' && parseInt(order.bnplMonths) > 0) { %>
+            <div class="alert alert-info mt-3" style="font-size: 0.9rem;">
+              <strong>💳 Payment Plan Selected:</strong> <%= order.bnplMonths %>-month installment
+              <br>
+              <small>
+                Equivalent to: <strong>$<%= (parseFloat(order.total) / parseInt(order.bnplMonths)).toFixed(2) %>/month</strong> × <%= order.bnplMonths %> months
+              </small>
+              <br>
+              <small class="text-muted">
+                <em>Note: Full amount paid upfront. This shows the installment breakdown for reference.</em>
+              </small>
+            </div>
+            <% } %>
           </div>
         </div>
 
         <!-- Payment Status -->
         <div class="invoice-status">
-          <p>✓ Order Confirmed - Payment Received</p>
+          <p>✓ Order Confirmed - Payment Received (Full Amount)</p>
         </div>
 
         <!-- Action Buttons -->

@@ -112,10 +112,13 @@
           <div class="checkout-card checkout-summary-sticky">
             <h3 class="checkout-section-title">💳 Payment Summary</h3>
             
+            <!-- Currency Selector -->
+            <div id="currency-selector" class="mb-4"></div>
+            
             <div class="checkout-totals">
               <div class="checkout-total-row">
                 <span>Subtotal:</span>
-                <span>$<%= total.toFixed(2) %></span>
+                <span id="subtotal-amount">$<%= total.toFixed(2) %></span>
               </div>
               <div class="checkout-total-row">
                 <span>Shipping:</span>
@@ -127,14 +130,20 @@
               </div>
               <div class="checkout-total-row checkout-grand-total">
                 <span>Total:</span>
-                <span>$<%= total.toFixed(2) %></span>
+                <span id="grand-total-amount">$<%= total.toFixed(2) %></span>
               </div>
             </div>
 
+            <!-- BNPL Calculator -->
+            <div id="bnpl-calculator" class="mb-3"></div>
+
             <div class="checkout-actions">
-              <form method="post" action="/checkout">
+              <form method="post" action="/payment-options" id="payment-form">
+                <input type="hidden" name="total" id="hidden-total" value="<%= total.toFixed(2) %>">
+                <input type="hidden" name="currency" id="hidden-currency" value="SGD">
+                <input type="hidden" name="bnplMonths" id="hidden-bnpl-months" value="">
                 <button type="submit" class="btn btn-success btn-lg w-100">
-                  ✅ Place Order
+                  💳 Proceed to Payment
                 </button>
               </form>
               <a href="/cart" class="btn btn-outline-primary w-100 mt-2">
@@ -154,5 +163,37 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/js/theme.js"></script>
+  <script src="/js/currency.js"></script>
+  <script src="/js/bnpl.js"></script>
+  <script>
+    // Initialize currency selector and BNPL calculator
+    const baseTotal = <%= total.toFixed(2) %>;
+    const sgdTotal = baseTotal; // Always charge SGD amount
+    
+    // Initialize currency selector with callback
+    initCurrencySelector('currency-selector', baseTotal, function(currency, convertedAmount, formattedAmount) {
+      // Update displayed amounts (for reference only)
+      document.getElementById('subtotal-amount').textContent = formattedAmount;
+      document.getElementById('grand-total-amount').textContent = formattedAmount;
+      
+      // IMPORTANT: Hidden form field always uses SGD amount
+      document.getElementById('hidden-total').value = sgdTotal.toFixed(2);
+      document.getElementById('hidden-currency').value = currency; // For display purposes
+      
+      // Reinitialize BNPL with converted amount for display
+      initBNPL('bnpl-calculator', convertedAmount, currency);
+    });
+    
+    // Initialize BNPL calculator with base currency
+    initBNPL('bnpl-calculator', baseTotal, 'SGD');
+    
+    // Update hidden BNPL field when form is submitted
+    document.getElementById('payment-form').addEventListener('submit', function() {
+      const selectedPlan = getSelectedBNPLPlan();
+      if (selectedPlan) {
+        document.getElementById('hidden-bnpl-months').value = selectedPlan;
+      }
+    });
+  </script>
 </body>
 </html>

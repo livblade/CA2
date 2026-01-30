@@ -303,8 +303,13 @@ module.exports = {
             return res.redirect('/login');
         }
 
+        // Get display currency and BNPL info from session
+        const displayCurrency = req.session.paymentCurrency || null;
+        const bnplMonths = req.session.bnplMonths || null;
+
         // Persist order (insert into orders, then insert order_items)
-        productModel.addOrder(userId, total, (err, result) => {
+        // Pass displayCurrency and bnplMonths as parameters
+        productModel.addOrder(userId, total, displayCurrency, bnplMonths, (err, result) => {
             if (err) {
                 req.flash('error', 'Unable to place order');
                 return next(err);

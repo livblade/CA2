@@ -2,6 +2,31 @@ const express = require('express');
 const session = require('express-session');
 const flash = require('connect-flash');
 const multer = require('multer');
+const bodyParser = require("body-parser");
+const netsQr= require("./services/nets");
+const axios = require('axios');
+
+//variables in the .env file will be available in process.env
+require('dotenv').config();
+
+// Initialize Stripe only if secret key is available
+let stripe = null;
+if (process.env.STRIPE_SECRET_KEY) {
+    const stripeModule = require('stripe');
+    stripe = stripeModule(process.env.STRIPE_SECRET_KEY);
+}
+
+// Initialize PayPal SDK if credentials are available
+const paypal = require('@paypal/checkout-server-sdk');
+let paypalClient = null;
+if (process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET) {
+    const Environment = process.env.NODE_ENV === 'production'
+        ? paypal.core.LiveEnvironment
+        : paypal.core.SandboxEnvironment;
+    const paypalEnv = new Environment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);
+    paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
+}
+
 const app = express();
 
 // Import controllers
@@ -36,6 +61,7 @@ app.use(express.static('public'));
 app.use(express.urlencoded({
     extended: false
 }));
+app.use(bodyParser.json());
 
 //TO DO: Insert code for Session Middleware below 
 app.use(session({
@@ -95,8 +121,102 @@ const validateRegistration = (req, res, next) => {
 };
 
 // Define routes
+app.post('/generateNETSQR', netsQr.generateQrCode);
+app.get("/nets-qr/success", (req, res) => {
+    res.render('netsTxnSuccessStatus', { message: 'Transaction Successful!' });
+});
+app.get("/nets-payment-success", checkAuthenticated, (req, res, next) => {
+    // Place the order after successful payment
+    return productController.checkout(req, res, next);
+});
+app.get("/nets-qr/fail", (req, res) => {
+    res.render('netsTxnFailStatus', { message: 'Transaction Failed. Please try again.' });
+});
+
+//errors
+app.get('/401', (req, res) => {
+    res.render('401', { errors: req.flash('error') });
+});
+
+//Endpoint in your backend which is a Server-Sent Events (SSE) endpoint that allows your frontend (browser) 
+//to receive real-time updates about the payment status of a NETS QR transaction.
+app.get('/sse/payment-status/:txnRetrievalRef', async (req, res) => {
+    res.set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+    });
+
+    const txnRetrievalRef = req.params.txnRetrievalRef;
+    let pollCount = 0;
+    const maxPolls = 60; // 5 minutes if polling every 5s
+    let frontendTimeoutStatus = 0;
+
+    const interval = setInterval(async () => {
+        pollCount++;
+
+        try {
+            // Call the NETS query API
+            const response = await axios.post(
+                'https://sandbox.nets.openapipaas.com/api/v1/common/payments/nets-qr/query',
+                { txn_retrieval_ref: txnRetrievalRef, frontend_timeout_status: frontendTimeoutStatus },
+                {
+                    headers: {
+                        'api-key': process.env.API_KEY,
+                        'project-id': process.env.PROJECT_ID,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+
+            console.log("Polling response:", response.data);
+            // Send the full response to the frontend
+            res.write(`data: ${JSON.stringify(response.data)}\n\n`);
+        
+          const resData = response.data.result.data;
+
+            // Decide when to end polling and close the connection
+            //Check if payment is successful
+            if (resData.response_code == "00" && resData.txn_status === 1) {
+                // Payment success: send a success message
+                res.write(`data: ${JSON.stringify({ success: true })}\n\n`);
+                clearInterval(interval);
+                res.end();
+            } else if (frontendTimeoutStatus == 1 && resData && (resData.response_code !== "00" || resData.txn_status === 2)) {
+                // Payment failure: send a fail message
+                res.write(`data: ${JSON.stringify({ fail: true, ...resData })}\n\n`);
+                clearInterval(interval);
+                res.end();
+            }
+
+        } catch (err) {
+            clearInterval(interval);
+            res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+            res.end();
+        }
+
+
+        // Timeout
+        if (pollCount >= maxPolls) {
+            clearInterval(interval);
+            frontendTimeoutStatus = 1;
+            res.write(`data: ${JSON.stringify({ fail: true, error: "Timeout" })}\n\n`);
+            res.end();
+        }
+    }, 5000);
+
+    req.on('close', () => {
+        clearInterval(interval);
+    });
+});
+
 app.get('/',  (req, res) => {
     res.render('index', {user: req.session.user} );
+});
+
+// Demo page for new features (BNPL & Currency)
+app.get('/demo-features', (req, res) => {
+    res.render('demo-features', { user: req.session.user });
 });
 
 // Products routes (use controller)
@@ -337,6 +457,262 @@ app.get('/checkout', checkAuthenticated, (req, res) => {
     res.render('checkout', { cart, user: req.session.user, total });
 });
 
+// Payment options page
+app.get('/payment-options', checkAuthenticated, (req, res) => {
+    const cart = req.session.cart || [];
+    // Calculate total
+    cart.forEach(item => {
+        item.price = parseFloat(item.price) || 0;
+        item.quantity = parseInt(item.quantity) || 0;
+        item.total = item.price * item.quantity;
+    });
+    const total = cart.reduce((sum, item) => sum + item.total, 0);
+    res.render('payment-options', { 
+        user: req.session.user, 
+        total, 
+        stripeConfigured: !!stripe, 
+        paypalConfigured: !!paypalClient,
+        currency: 'SGD',
+        bnplMonths: null
+    });
+});
+
+app.post('/payment-options', checkAuthenticated, (req, res) => {
+    const total = parseFloat(req.body.total) || 0;
+    const currency = req.body.currency || 'SGD';
+    const bnplMonths = req.body.bnplMonths || null;
+    
+    res.render('payment-options', { 
+        user: req.session.user, 
+        total, 
+        stripeConfigured: !!stripe, 
+        paypalConfigured: !!paypalClient,
+        currency: currency,
+        bnplMonths: bnplMonths
+    });
+});
+
+// Stripe Payment Routes
+app.post('/create-stripe-checkout', checkAuthenticated, async (req, res) => {
+    if (!stripe) {
+        return res.redirect('/payment-options?error=stripe_not_configured');
+    }
+    
+    const cart = req.session.cart || [];
+    const total = parseFloat(req.body.cartTotal) || 0; // This is SGD amount
+    
+    // Currency is for display only - always charge SGD
+    const displayCurrency = req.body.currency || 'SGD';
+    
+    // Store currency and BNPL info in session for order processing
+    req.session.paymentCurrency = displayCurrency;
+    req.session.paymentAmount = total;
+    req.session.bnplMonths = req.body.bnplMonths || null;
+    
+    try {
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [
+                {
+                    price_data: {
+                        currency: 'sgd', // Always charge in SGD
+                        product_data: {
+                            name: 'Supermarket Order',
+                            description: 'Payment for your supermarket order',
+                        },
+                        unit_amount: Math.round(total * 100), // SGD amount in cents
+                    },
+                    quantity: 1,
+                },
+            ],
+            mode: 'payment',
+            success_url: `${req.protocol}://${req.get('host')}/stripe-success?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${req.protocol}://${req.get('host')}/stripe-cancel`,
+            metadata: {
+                userId: req.session.user.userId,
+                cartItems: JSON.stringify(cart),
+                displayCurrency: displayCurrency,
+                bnplMonths: req.session.bnplMonths || 'none'
+            }
+        });
+        
+        res.redirect(session.url);
+    } catch (error) {
+        console.error('Stripe checkout error:', error);
+        res.redirect('/payment-options?error=stripe_checkout_failed');
+    }
+});
+
+app.get('/stripe-success', checkAuthenticated, async (req, res) => {
+    if (!stripe) {
+        return res.redirect('/cart?error=stripe_not_configured');
+    }
+    
+    const session = await stripe.checkout.sessions.retrieve(req.query.session_id);
+    
+    if (session.payment_status === 'paid') {
+        // Clear cart and create order
+        const cart = req.session.cart || [];
+        const userId = req.session.user.userId;
+
+        // Calculate total from cart
+        cart.forEach(item => {
+            item.price = parseFloat(item.price) || 0;
+            item.quantity = parseInt(item.quantity) || 0;
+            item.total = item.price * item.quantity;
+        });
+        const total = cart.reduce((sum, item) => sum + item.total, 0);
+
+        // Create order in database
+        const db = require('./db');
+        const productModel = require('./models/productModel');
+
+        try {
+            // Get BNPL and display currency from session
+            const displayCurrency = req.session.paymentCurrency || 'SGD';
+            const bnplMonths = req.session.bnplMonths || null;
+            
+            // Insert order with display currency and BNPL info
+            const orderResult = await new Promise((resolve, reject) => {
+                db.query('INSERT INTO orders (userId, total, displayCurrency, bnplMonths, createdAt) VALUES (?, ?, ?, ?, NOW())',
+                    [userId, total, displayCurrency, bnplMonths], (err, result) => {
+                    if (err) reject(err);
+                    else resolve(result);
+                });
+            });
+
+            // Get the auto-generated order ID
+            const orderId = orderResult.insertId;
+
+            // Insert order items
+            for (const item of cart) {
+                await new Promise((resolve, reject) => {
+                    db.query('INSERT INTO order_items (orderId, productId, productName, price, quantity) VALUES (?, ?, ?, ?, ?)',
+                        [orderId, item.productId, item.productName, item.price, item.quantity], (err, result) => {
+                        if (err) reject(err);
+                        else resolve(result);
+                    });
+                });
+            }
+
+            // Decrease stock for each product in the order
+            for (const item of cart) {
+                await new Promise((resolve, reject) => {
+                    productModel.decreaseProductStock(item.productId, item.quantity, (err) => {
+                        if (err) {
+                            console.error(`Failed to decrease stock for product ${item.productId}:`, err);
+                        }
+                        resolve();
+                    });
+                });
+            }
+
+            // Clear cart
+            req.session.cart = [];
+
+            res.render('stripeSuccess', {
+                user: req.session.user,
+                orderId: orderId,
+                total: total
+            });
+        } catch (error) {
+            console.error('Order creation error:', error);
+            res.redirect('/cart?error=order_creation_failed');
+        }
+    } else {
+        res.redirect('/stripe-cancel');
+    }
+});
+
+app.get('/stripe-cancel', checkAuthenticated, (req, res) => {
+    res.render('stripeCancel', { user: req.session.user });
+});
+
+// PayPal Payment Routes
+app.post('/create-paypal-order', checkAuthenticated, async (req, res) => {
+    if (!paypalClient) return res.status(500).json({ error: 'PayPal not configured' });
+    const cart = req.session.cart || [];
+    const total = cart.reduce((sum, item) => sum + (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0), 0);
+    const request = new paypal.orders.OrdersCreateRequest();
+    request.prefer('return=representation');
+    request.requestBody({
+        intent: 'CAPTURE',
+        purchase_units: [{
+            amount: {
+                currency_code: 'SGD',
+                value: total.toFixed(2)
+            }
+        }]
+    });
+    try {
+        const order = await paypalClient.execute(request);
+        res.json({ id: order.result.id });
+    } catch (err) {
+        console.error('PayPal order creation error:', err);
+        res.status(500).json({ error: 'Failed to create PayPal order' });
+    }
+});
+
+app.post('/capture-paypal-order', checkAuthenticated, async (req, res) => {
+    if (!paypalClient) return res.status(500).json({ error: 'PayPal not configured' });
+    const { orderID } = req.body;
+    const request = new paypal.orders.OrdersCaptureRequest(orderID);
+    request.requestBody({});
+    try {
+        const capture = await paypalClient.execute(request);
+        // On success, create order in DB
+        const cart = req.session.cart || [];
+        const userId = req.session.user.userId;
+        cart.forEach(item => {
+            item.price = parseFloat(item.price) || 0;
+            item.quantity = parseInt(item.quantity) || 0;
+            item.total = item.price * item.quantity;
+        });
+        const total = cart.reduce((sum, item) => sum + item.total, 0);
+        const db = require('./db');
+        const productModel = require('./models/productModel');
+        
+        // Get BNPL and display currency from session
+        const displayCurrency = req.session.paymentCurrency || 'SGD';
+        const bnplMonths = req.session.bnplMonths || null;
+        
+        // Insert order and items, then decrease stock
+        const orderResult = await new Promise((resolve, reject) => {
+            db.query('INSERT INTO orders (userId, total, displayCurrency, bnplMonths, createdAt) VALUES (?, ?, ?, ?, NOW())',
+                [userId, total, displayCurrency, bnplMonths], (err, result) => {
+                if (err) reject(err);
+                else resolve(result);
+            });
+        });
+        const orderId = orderResult.insertId;
+        
+        for (const item of cart) {
+            await new Promise((resolve, reject) => {
+                db.query('INSERT INTO order_items (orderId, productId, productName, price, quantity) VALUES (?, ?, ?, ?, ?)',
+                    [orderId, item.productId, item.productName, item.price, item.quantity], (err, result) => {
+                    if (err) reject(err);
+                    else resolve(result);
+                });
+            });
+        }
+        
+        for (const item of cart) {
+            await new Promise((resolve, reject) => {
+                productModel.decreaseProductStock(item.productId, item.quantity, (err) => {
+                    if (err) console.error(`Failed to decrease stock for product ${item.productId}:`, err);
+                    resolve();
+                });
+            });
+        }
+        
+        req.session.cart = [];
+        res.json({ success: true, orderId });
+    } catch (err) {
+        console.error('PayPal capture error:', err);
+        res.status(500).json({ error: 'Failed to capture PayPal order' });
+    }
+});
+
 // Orders & invoice
 app.get('/orders', checkAuthenticated, (req, res, next) => {
     return productController.getOrders(req, res, next);
@@ -410,6 +786,99 @@ app.post('/wishlist/update-notes', checkAuthenticated, (req, res, next) => {
 
 app.post('/wishlist/move-to-cart', checkAuthenticated, (req, res, next) => {
   return wishlistController.moveAllToCart(req, res, next);
+});
+
+// ========================================
+// Currency Conversion API Routes
+// ========================================
+
+/**
+ * Get exchange rates from external API
+ * Caches rates for 1 hour to reduce API calls
+ */
+let exchangeRatesCache = null;
+let cacheExpiry = null;
+
+app.get('/api/exchange-rates', async (req, res) => {
+    const baseCurrency = req.query.base || 'SGD';
+    
+    // Check if cache is valid
+    if (exchangeRatesCache && cacheExpiry && Date.now() < cacheExpiry) {
+        return res.json(exchangeRatesCache);
+    }
+    
+    try {
+        // Using exchangerate-api.com (free tier)
+        // Alternative: You can use other APIs like fixer.io, currencyapi.com, etc.
+        const apiUrl = `https://api.exchangerate-api.com/v4/latest/${baseCurrency}`;
+        const response = await axios.get(apiUrl);
+        
+        const data = {
+            base: response.data.base,
+            rates: response.data.rates,
+            time_last_update_utc: response.data.time_last_update_utc || new Date().toISOString()
+        };
+        
+        // Cache for 1 hour
+        exchangeRatesCache = data;
+        cacheExpiry = Date.now() + (60 * 60 * 1000);
+        
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching exchange rates:', error);
+        
+        // Return fallback rates if API fails
+        res.json({
+            base: baseCurrency,
+            rates: {
+                'SGD': 1.00,
+                'USD': 0.74,
+                'EUR': 0.68,
+                'GBP': 0.58,
+                'JPY': 110.50,
+                'AUD': 1.09,
+                'CNY': 4.76,
+                'MYR': 3.12,
+                'THB': 25.20,
+                'KRW': 880.00
+            },
+            time_last_update_utc: new Date().toISOString(),
+            fallback: true
+        });
+    }
+});
+
+/**
+ * Calculate BNPL installment plans
+ */
+app.post('/api/calculate-bnpl', (req, res) => {
+    const { amount, months, currency } = req.body;
+    
+    if (!amount || !months) {
+        return res.status(400).json({ error: 'Amount and months are required' });
+    }
+    
+    const totalAmount = parseFloat(amount);
+    const installmentMonths = parseInt(months);
+    
+    if (totalAmount < 50) {
+        return res.json({ 
+            qualifies: false, 
+            message: 'Minimum amount for BNPL is 50 currency units' 
+        });
+    }
+    
+    const monthlyPayment = totalAmount / installmentMonths;
+    
+    res.json({
+        qualifies: true,
+        totalAmount: totalAmount,
+        months: installmentMonths,
+        monthlyPayment: monthlyPayment.toFixed(2),
+        currency: currency || 'SGD',
+        interestRate: 0,
+        totalInterest: 0
+    });
 });
 
 const PORT = process.env.PORT || 3000;
